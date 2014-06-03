@@ -29,6 +29,9 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
   # Max form content size in bytes. Set to -1 to disable.
   config :maxFormSize, :validate => :number, :default => 200000
 
+  # Jetty Server Connector acceptQueueSize. 0 uses implementation default.
+  config :acceptQueueSize, :validate => :number, :default => 0
+
   def initialize(*args)
     super(*args)
   end # def initialize
@@ -42,6 +45,7 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
     def handle(target, baseRequest, httpRequest, httpResponse)
       case httpRequest.getMethod() 
       when 'PUT', 'POST'
+        setKeepAlive(httpRequest, httpResponse)
         httpResponse.setStatus(200)
         scanner = Java::java.util.Scanner.new(httpRequest.getInputStream(), "UTF-8")
           .useDelimiter("\\A")
@@ -49,15 +53,15 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
         if scanner.hasNext()
           @codec.clone.decode(scanner.next()) do |event|
             @parent.decorate(event)
-            event["host"] = httpRequest.getRemoteAddr()
+            if !event.include?("host") || event["host"].empty?
+              event["host"] = httpRequest.getRemoteAddr()
+            end
             @output_queue << event
           end
         end
 
-      when 'GET'
-        ka = httpRequest.getHeader('Connection')
-        if ka and ka.downcase == 'keep-alive'
-          httpResponse.addHeader('Connection', 'Keep-Alive')
+      when 'HEAD', 'GET'
+        if setKeepAlive(httpRequest, httpResponse)
           httpResponse.setStatus(200)
         else
           httpResponse.setStatus(501)
@@ -68,6 +72,16 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
       end
   
       baseRequest.setHandled(true)
+    end
+
+    def setKeepAlive(httpRequest, httpResponse)
+      ka = httpRequest.getHeader('Connection')
+      if ka && ka.downcase == 'keep-alive'
+        httpResponse.addHeader('Connection', 'Keep-Alive')
+        return true
+      else
+        return false
+      end
     end
 
     def setupInput(parent, output_queue)
@@ -91,6 +105,8 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
       'org.eclipse.jetty.server.Request.maxFormContentSize',
       @maxFormSize
     )
+
+    @server.getConnectors()[0].setAcceptQueueSize(@acceptQueueSize)
     
     handler = LogHandler.new
     handler.setupInput(self, output_queue)
